@@ -21,6 +21,34 @@ import { invoke } from "@tauri-apps/api/core";
 export const isDesktop =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+/** The route helper is intentionally Windows-only: macOS VPN exclusion is a
+ * Network Extension policy, not a safe equivalent of a persistent host route. */
+export const isWindowsDesktop =
+  isDesktop && typeof navigator !== "undefined" && /^Win/i.test(navigator.platform);
+
+const PROXY_BYPASS_KEY = "pibrowse.proxy-bypass-tun";
+
+/** Machine-local preference. On Windows it defaults on: doing nothing is the
+ * surprising choice when a system TUN silently puts the upstream inside a
+ * second proxy. Other platforms never offer or run it. */
+export function proxyBypassEnabled(): boolean {
+  if (!isWindowsDesktop) return false;
+  try {
+    return localStorage.getItem(PROXY_BYPASS_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+export function setProxyBypassEnabled(enabled: boolean): void {
+  try {
+    localStorage.setItem(PROXY_BYPASS_KEY, enabled ? "on" : "off");
+  } catch {
+    // A locked-down WebView can refuse storage. The current form still keeps
+    // the choice; the next one falls back to the safe Windows default.
+  }
+}
+
 export type Perm =
   | "view" | "launch" | "edit_profile" | "edit_fingerprint" | "edit_proxy"
   | "reveal_secrets" | "export_cookies" | "create_profile" | "delete_profile"
@@ -531,6 +559,14 @@ export interface LocalProxy {
   checker_url: string | null;
 }
 
+export interface ProxyBypassReport {
+  supported: boolean;
+  changed: boolean;
+  addresses: string[];
+  interface_index: number | null;
+  gateway: string | null;
+}
+
 export interface Me {
   user_id: string;
   email: string;
@@ -767,6 +803,30 @@ function devMachineId(): string {
     localStorage.setItem(key, id);
   }
   return id;
+}
+
+/** Host portion of the proxy URLs built in proxyUrl.ts. `URL` cannot parse
+ * these reliably because provider passwords are deliberately not percent
+ * encoded; the final @ is the credential delimiter and the final colon is the
+ * port delimiter (except for a bracketed IPv6 host). */
+function upstreamHost(url: string): string | null {
+  const scheme = url.indexOf("://");
+  if (scheme < 0) return null;
+  const authority = url.slice(scheme + 3).split("/", 1)[0];
+  const endpoint = authority.slice(authority.lastIndexOf("@") + 1);
+  if (endpoint.startsWith("[")) {
+    const end = endpoint.indexOf("]");
+    return end > 1 ? endpoint.slice(1, end) : null;
+  }
+  const colon = endpoint.lastIndexOf(":");
+  return colon > 0 ? endpoint.slice(0, colon) : null;
+}
+
+async function autoProxyBypass(hosts: (string | null | undefined)[]): Promise<ProxyBypassReport | null> {
+  if (!proxyBypassEnabled()) return null;
+  const unique = [...new Set(hosts.map((h) => h?.trim()).filter((h): h is string => !!h))];
+  if (unique.length === 0) return null;
+  return cmd<ProxyBypassReport>("ensure_proxy_bypass", { hosts: unique });
 }
 
 // ---------------------------------------------------------------------------
@@ -1151,11 +1211,15 @@ export const api = {
   totpCode: (profileId: string, id: string): Promise<TotpCode> =>
     cmd<TotpCode>("totp_code", { profileId, id }),
 
-  saveProxy: (proxy: Partial<LocalProxy>, origin?: Origin): Promise<{ id: string }> =>
-    cmd<{ id: string }>("save_proxy", { proxy, origin: origin ?? null }),
+  ensureProxyBypass: (hosts: string[]): Promise<ProxyBypassReport | null> =>
+    autoProxyBypass(hosts),
+  async saveProxy(proxy: Partial<LocalProxy>, origin?: Origin): Promise<{ id: string }> {
+    await autoProxyBypass([proxy.host]);
+    return cmd<{ id: string }>("save_proxy", { proxy, origin: origin ?? null });
+  },
   deleteProxy: (id: string, origin?: Origin): Promise<unknown> =>
     cmd("delete_proxy", { id, origin: origin ?? null }),
-  checkProxy: (url: string, checkerUrl?: string | null, proxyId?: string | null): Promise<{
+  async checkProxy(url: string, checkerUrl?: string | null, proxyId?: string | null): Promise<{
     ok: boolean; error?: string; ip?: string; country?: string;
     city?: string; timezone?: string; org?: string; ms?: number;
     /** Why it failed, for the interface's own sentence (ipc.rs check_failure). */
@@ -1164,11 +1228,16 @@ export const api = {
      *  nothing. Present only on a failure, and only when the other family
      *  actually worked — see agent/src/diagnose.rs `speaks_instead`. */
     suggested_kind?: string | null;
-  }> => cmd("check_proxy", { url, checkerUrl: checkerUrl || null, proxyId: proxyId || null }),
+  }> {
+    await autoProxyBypass([upstreamHost(url)]);
+    return cmd("check_proxy", { url, checkerUrl: checkerUrl || null, proxyId: proxyId || null });
+  },
   /** The check step by step; the first failing step carries a `code` the
    *  interface translates. See agent/src/diagnose.rs. */
-  diagnoseProxy: (url: string, checkerUrl?: string | null, proxyId?: string | null): Promise<Diagnosis> =>
-    cmd<Diagnosis>("diagnose_proxy", { url, checkerUrl: checkerUrl || null, proxyId: proxyId || null }),
+  async diagnoseProxy(url: string, checkerUrl?: string | null, proxyId?: string | null): Promise<Diagnosis> {
+    await autoProxyBypass([upstreamHost(url)]);
+    return cmd<Diagnosis>("diagnose_proxy", { url, checkerUrl: checkerUrl || null, proxyId: proxyId || null });
+  },
   rotateProxy: (id: string): Promise<{ ok: boolean; error?: string }> =>
     cmd("rotate_proxy", { id }),
   // ---- giving one profile to one person --------------------------------
@@ -1255,7 +1324,12 @@ export const api = {
   ): Promise<{
     saved: { id: string; line: number; host: string; port: number; shape: string }[];
     rejected: { line: number; error: string; code?: string }[];
-  }> => cmd("import_proxies", { text, namePrefix, origin: origin ?? null }),
+  }> => cmd("import_proxies", {
+    text,
+    namePrefix,
+    origin: origin ?? null,
+    bypassTun: proxyBypassEnabled(),
+  }),
 
   exportCookies: (id: string): Promise<{ cookies: unknown[] }> =>
     cmd("export_cookies", { id }),

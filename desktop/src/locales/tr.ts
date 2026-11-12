@@ -6,6 +6,9 @@ import type { Key } from "../i18n";
 /** Turkish. Typed as a full record, like the other languages in i18n.ts: a key
  *  added to the English table without a translation here stops the build. */
 export const tr: Record<Key, string> = {
+  "px.bypassTun": "VPN / TUN",
+  "px.bypassTunOn": "Bu proxy sunucusuna sistem VPN/TUN dışından bağlan",
+  "px.bypassTunHint": "PiBrowse fiziksel ağ üzerinden kalıcı bir rota ekler. Siteler yine proxy çıkışını görür; Windows yalnızca yeni bir proxy IP'si için yönetici izni ister.",
   "err.strictProxy": "Strict account isolation requires a proxy for every profile. Direct connections are disabled.",
   "err.tooManyProfiles": "Five profiles are already open or launching. Close one before opening another.",
   "err.exitCheck": "The proxy exit could not be verified. Strict isolation kept this profile closed.",

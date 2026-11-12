@@ -2,7 +2,13 @@
 // Copyright 2026 Bogdan Shapovalov and the Fury authors
 
 import { useRef, useState } from "react";
-import { api, type LocalProxy } from "../api";
+import {
+  api,
+  isWindowsDesktop,
+  proxyBypassEnabled,
+  setProxyBypassEnabled,
+  type LocalProxy,
+} from "../api";
 import { Icon } from "./Icon";
 import { NetworkReport } from "./NetworkReport";
 import { useI18n } from "../i18n";
@@ -82,6 +88,7 @@ export function ProxyForm({
   const [diagnosing, setDiagnosing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [bypassTun, setBypassTun] = useState(proxyBypassEnabled);
 
   const complete = host.trim() !== "" && Number(port) > 0;
   /** The address as typed. `k` is passed explicitly when a check follows a
@@ -92,8 +99,11 @@ export function ProxyForm({
   const runCheck = async (k = kind) => {
     setBusy(true);
     setCheck(null);
+    setError(null);
     try {
       setCheck(await api.checkProxy(url(k), checker, editing?.id ?? null));
+    } catch (e) {
+      setError(say(e));
     } finally {
       setBusy(false);
     }
@@ -216,6 +226,26 @@ export function ProxyForm({
               {/* A team proxy's login and password never reach this form, and
                   two empty fields read as "the update lost them". */}
               {editing?.sealed && !locked && <p className="hint">{t("px.savedHint")}</p>}
+            </div>
+          </div>}
+
+          {isWindowsDesktop && !wg && <div className="field">
+            <label htmlFor="f-bypass-tun">{t("px.bypassTun")}</label>
+            <div>
+              <label className="row" htmlFor="f-bypass-tun" style={{ gap: 8 }}>
+                <input
+                  id="f-bypass-tun"
+                  type="checkbox"
+                  style={{ width: 14, height: 14, accentColor: "var(--accent)" }}
+                  checked={bypassTun}
+                  onChange={(e) => {
+                    setBypassTun(e.target.checked);
+                    setProxyBypassEnabled(e.target.checked);
+                  }}
+                />
+                <span>{t("px.bypassTunOn")}</span>
+              </label>
+              <p className="hint">{t("px.bypassTunHint")}</p>
             </div>
           </div>}
 

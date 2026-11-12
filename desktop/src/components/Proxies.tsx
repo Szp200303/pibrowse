@@ -42,6 +42,16 @@ export function Proxies({ profiles, local, myEmail = null }: { profiles: Profile
     const list = rows;
     setChecks(new Map());
     setChecking({ done: 0, total: list.length });
+    try {
+      // One elevation prompt for the whole list. Without this preflight three
+      // concurrent checker workers could each discover a missing route and
+      // each raise its own prompt.
+      await api.ensureProxyBypass(list.map((p) => p.host));
+    } catch (e) {
+      setError(say(e));
+      setChecking(null);
+      return;
+    }
     let done = 0;
     // Three at a time: the checker is a third party, and forty simultaneous
     // requests from one address is how a checker starts refusing.

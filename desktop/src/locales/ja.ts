@@ -6,6 +6,9 @@ import type { Key } from "../i18n";
 /** Japanese. Typed as a full record, like the other languages in i18n.ts: a key
  *  added to the English table without a translation here stops the build. */
 export const ja: Record<Key, string> = {
+  "px.bypassTun": "VPN / TUN",
+  "px.bypassTunOn": "このプロキシサーバーをシステム VPN/TUN の外側で接続",
+  "px.bypassTunHint": "PiBrowse は物理ネットワーク経由の永続ルートを追加します。Web サイトには引き続きプロキシ出口が見え、Windows は新しいプロキシ IP の場合のみ管理者権限を求めます。",
   "err.strictProxy": "Strict account isolation requires a proxy for every profile. Direct connections are disabled.",
   "err.tooManyProfiles": "Five profiles are already open or launching. Close one before opening another.",
   "err.exitCheck": "The proxy exit could not be verified. Strict isolation kept this profile closed.",

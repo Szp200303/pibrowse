@@ -6,6 +6,9 @@ import type { Key } from "../i18n";
 /** Korean. Typed as a full record, like the other languages in i18n.ts: a key
  *  added to the English table without a translation here stops the build. */
 export const ko: Record<Key, string> = {
+  "px.bypassTun": "VPN / TUN",
+  "px.bypassTunOn": "이 프록시 서버를 시스템 VPN/TUN 밖으로 연결",
+  "px.bypassTunHint": "PiBrowse가 물리 네트워크를 통한 영구 라우트를 추가합니다. 웹사이트에는 계속 프록시 출구가 보이며 Windows는 새 프록시 IP에서만 관리자 승인을 요청합니다.",
   "err.strictProxy": "Strict account isolation requires a proxy for every profile. Direct connections are disabled.",
   "err.tooManyProfiles": "Five profiles are already open or launching. Close one before opening another.",
   "err.exitCheck": "The proxy exit could not be verified. Strict isolation kept this profile closed.",

@@ -6,6 +6,9 @@ import type { Key } from "../i18n";
 /** Hindi. Typed as a full record, like the other languages in i18n.ts: a key
  *  added to the English table without a translation here stops the build. */
 export const hi: Record<Key, string> = {
+  "px.bypassTun": "VPN / TUN",
+  "px.bypassTunOn": "इस प्रॉक्सी सर्वर को सिस्टम VPN/TUN के बाहर जोड़ें",
+  "px.bypassTunHint": "PiBrowse भौतिक नेटवर्क के ज़रिए स्थायी रूट जोड़ता है। वेबसाइटें अभी भी प्रॉक्सी एग्ज़िट देखती हैं; Windows केवल नई प्रॉक्सी IP पर एडमिन अनुमति मांगता है।",
   "err.strictProxy": "Strict account isolation requires a proxy for every profile. Direct connections are disabled.",
   "err.tooManyProfiles": "Five profiles are already open or launching. Close one before opening another.",
   "err.exitCheck": "The proxy exit could not be verified. Strict isolation kept this profile closed.",

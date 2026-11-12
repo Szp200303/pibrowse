@@ -17,6 +17,7 @@ mod agent;
 mod assistants;
 mod commands;
 mod crypto;
+mod proxy_bypass;
 mod session;
 mod settings;
 mod update;
@@ -178,6 +179,7 @@ fn main() {
             commands::delete_credential,
             commands::totp_code,
             commands::save_proxy,
+            commands::ensure_proxy_bypass,
             commands::check_proxy,
             commands::diagnose_proxy,
             commands::rotate_proxy,

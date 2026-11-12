@@ -2590,6 +2590,23 @@ pub async fn vault_status(retry: bool) -> R<serde_json::Value> {
     Ok(crate::agent::call(method, serde_json::json!({})).await?)
 }
 
+/// Give one or more upstream proxy servers a persistent /32 route through the
+/// active physical Windows interface. The browser traffic still goes through
+/// the proxy; only the machine-to-proxy hop bypasses a system-wide VPN/TUN.
+///
+/// The helper validates and resolves every host before it asks for elevation.
+/// On non-Windows platforms this is a harmless unsupported report, which keeps
+/// the web interface portable without exposing a shell command to it.
+#[tauri::command]
+pub async fn ensure_proxy_bypass(hosts: Vec<String>) -> R<serde_json::Value> {
+    let report = tokio::task::spawn_blocking(move || crate::proxy_bypass::ensure(&hosts))
+        .await
+        .map_err(|e| ApiErr::coded("err.proxyBypass", format!("The route task stopped: {e}")))?
+        .map_err(|e| ApiErr::coded("err.proxyBypass", e))?;
+    serde_json::to_value(report)
+        .map_err(|e| ApiErr::coded("err.proxyBypass", format!("Could not report the route: {e}")))
+}
+
 /// Save a proxy.
 ///
 /// In team mode the credentials are sealed here, before anything leaves this
@@ -3356,7 +3373,22 @@ pub async fn import_proxies(
     text: String,
     name_prefix: String,
     origin: Option<String>,
+    bypass_tun: Option<bool>,
 ) -> R<serde_json::Value> {
+    if bypass_tun.unwrap_or(false) {
+        let hosts: Vec<String> = fury_shared::proxy_list::parse_block(&text)
+            .into_iter()
+            .filter_map(|(_, parsed)| parsed.ok().map(|p| p.host))
+            .collect();
+        if !hosts.is_empty() {
+            tokio::task::spawn_blocking(move || crate::proxy_bypass::ensure(&hosts))
+                .await
+                .map_err(|e| {
+                    ApiErr::coded("err.proxyBypass", format!("The route task stopped: {e}"))
+                })?
+                .map_err(|e| ApiErr::coded("err.proxyBypass", e))?;
+        }
+    }
     // `origin` as for `proxies`: the CSV and anti-detect imports are local
     // only and say so, so a connected shell still files them on this machine.
     if local_for(&state, origin.as_deref()) {
