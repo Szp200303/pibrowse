@@ -5,15 +5,18 @@ with no more than five open at once.
 
 ## Proxy choice and format
 
-Use authenticated SOCKS5 with a fixed or provider-sticky exit. SOCKS5 carries
-the destination hostname to the proxy, and PiBrowse's per-profile relay always
-uses remote-resolution semantics. Do not use SOCKS4. Do not buy a plan that
-rotates the exit on every request for a long-lived account.
+Use authenticated HTTP CONNECT or SOCKS5 with a fixed or provider-sticky exit.
+Select the protocol the provider actually supplies: an HTTP endpoint entered as
+SOCKS5 closes the greeting and looks dead even when its IP and credentials are
+good. PiBrowse's per-profile relay sends the destination through either proxy;
+SOCKS5 uses remote-resolution semantics. Do not use SOCKS4. Do not buy a plan
+that rotates the exit on every request for a long-lived account.
 
 The import format is the common proxy URI form:
 
 ```text
 socks5://username:password@host:port
+http://username:password@host:port
 ```
 
 PiBrowse also accepts `socks5h://`; it normalises both forms to the same remote
@@ -28,6 +31,30 @@ Templates for ten accounts are in:
 Replace every example host, username and password before importing. Leave the
 timezone and languages cells empty: launch then derives both, plus geolocation,
 from the checked proxy exit instead of pinning a contradictory value.
+
+## Windows VPN/TUN compatibility
+
+The proxy form has **VPN/TUN compatibility** enabled by default on Windows.
+When a new proxy is saved, checked or diagnosed, PiBrowse:
+
+1. resolves the proxy server to IPv4;
+2. finds the active physical Ethernet or Wi-Fi default route rather than a
+   sing-box/Wintun adapter;
+3. adds a persistent `/32` route for that server after one Windows administrator
+   prompt;
+4. verifies that Windows installed the route on the selected physical adapter.
+
+This bypass applies only to the machine-to-proxy hop. Browser requests still go
+through the profile's proxy, while unrelated applications continue to follow
+the system VPN/TUN. An existing route is reused without another prompt. A bulk
+import or **Check all** operation batches all new server addresses into one
+prompt. Disable the option only when the upstream proxy itself is intentionally
+supposed to travel through the system VPN.
+
+The automatic route currently supports IPv4 proxy servers. A hostname with
+several IPv4 answers receives one route per answer. If the physical gateway
+changes, the next save or check detects the missing route and asks to create the
+new one.
 
 ## Enforced policy
 

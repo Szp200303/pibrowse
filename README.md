@@ -25,6 +25,19 @@ teams and is still in development.
 
 ## Getting started
 
+### Windows 账号隔离版
+
+- **[Windows 64 位安装程序（PiBrowse 0.5.6）](https://github.com/Szp200303/pibrowse/releases/download/v0.5.6-isolation.1/PiBrowse_0.5.6_x64-setup.exe)**
+- [版本说明与 SHA-256](https://github.com/Szp200303/pibrowse/releases/tag/v0.5.6-isolation.1)
+
+这个构建面向 10 个长期环境、最多 5 个并发。为每个环境保存独立浏览器数据，
+并在打开前检查代理和实际出口 IP。Windows 上使用 v2rayN/sing-box TUN 时，代理页的
+**VPN/TUN 兼容**默认开启：检测或保存新代理时，PiBrowse 会经一次 Windows 管理员确认，
+自动让代理服务器绕过系统 TUN。普通流量仍走 VPN/TUN，环境的网站流量仍走其各自代理。
+
+安装包尚未进行 Windows 代码签名，因此 SmartScreen 可能要求你确认来源。
+[Windows 配置与隔离说明](docs/25-windows-account-isolation.md)。
+
 macOS (Apple Silicon): [PiBrowse 0.5.5 preview](https://github.com/aronhy/pibrowse/releases/tag/v0.5.5).
 
 - **[Download desktop app for macOS (.dmg)](https://github.com/aronhy/pibrowse/releases/download/v0.5.5/pibrowse-0.5.5-macos-arm64.dmg)**
