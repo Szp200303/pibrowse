@@ -1,0 +1,11 @@
+name,proxy,tags,status,timezone,languages,persona,start_urls
+Account 01,socks5://USER_01:REPLACE_ME@proxy01.example.com:1080,isolated,new,,,windows-11-rtx4060-1920x1080,
+Account 02,socks5://USER_02:REPLACE_ME@proxy02.example.com:1080,isolated,new,,,windows-11-rtx4060-1920x1080,
+Account 03,socks5://USER_03:REPLACE_ME@proxy03.example.com:1080,isolated,new,,,windows-11-rtx4060-1920x1080,
+Account 04,socks5://USER_04:REPLACE_ME@proxy04.example.com:1080,isolated,new,,,windows-11-rtx4060-1920x1080,
+Account 05,socks5://USER_05:REPLACE_ME@proxy05.example.com:1080,isolated,new,,,windows-11-rtx4060-1920x1080,
+Account 06,socks5://USER_06:REPLACE_ME@proxy06.example.com:1080,isolated,new,,,windows-11-rtx4060-1920x1080,
+Account 07,socks5://USER_07:REPLACE_ME@proxy07.example.com:1080,isolated,new,,,windows-11-rtx4060-1920x1080,
+Account 08,socks5://USER_08:REPLACE_ME@proxy08.example.com:1080,isolated,new,,,windows-11-rtx4060-1920x1080,
+Account 09,socks5://USER_09:REPLACE_ME@proxy09.example.com:1080,isolated,new,,,windows-11-rtx4060-1920x1080,
+Account 10,socks5://USER_10:REPLACE_ME@proxy10.example.com:1080,isolated,new,,,windows-11-rtx4060-1920x1080,

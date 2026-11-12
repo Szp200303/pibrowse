@@ -100,6 +100,7 @@ is off unless you ask, and a team server can refuse it per role.
 | [`playwright_example.py`](playwright_example.py) | `connect_over_cdp`, the usual Python route. |
 | [`puppeteer_example.mjs`](puppeteer_example.mjs) | `connect`, the usual Node route. |
 | [`rotate.py`](rotate.py) | The thing people actually want: run one job across every profile in a project, one at a time, and never leave a browser open on a failure. |
+| [`windows-account-isolation/`](windows-account-isolation/) | Ten-profile Windows CSV and SOCKS5 proxy templates for the strict five-concurrent policy. |
 
 All four take the profile id from the command line, so:
 

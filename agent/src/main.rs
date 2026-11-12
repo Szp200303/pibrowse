@@ -26,6 +26,7 @@ mod http;
 mod import_browser;
 mod import_antidetect;
 mod install_core;
+mod isolation;
 mod ipc;
 mod mcp;
 mod launcher;

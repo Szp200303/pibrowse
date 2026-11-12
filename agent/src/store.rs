@@ -107,6 +107,16 @@ pub struct Proxy {
     pub checker_url: Option<String>,
 }
 
+/// Another profile already owns a network identity required by strict mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IsolationConflict {
+    pub profile_id: String,
+    pub profile_name: String,
+    /// `proxy` when the saved proxy is shared, `exit` when two proxies resolve
+    /// to the same public address.
+    pub kind: &'static str,
+}
+
 impl Proxy {
     /// The upstream URL the relay takes.
     pub fn url(&self) -> String {
@@ -335,6 +345,30 @@ impl Store {
             );
 
             CREATE INDEX IF NOT EXISTS profiles_by_project ON profiles(project_id);
+
+            -- A network identity stays assigned to the account even while the
+            -- browser is closed.  `profile_id` deliberately has no foreign key:
+            -- team profiles live on the server, but this machine must still
+            -- remember which exit it used for them on the next launch.
+            CREATE TABLE IF NOT EXISTS isolation_proxy_owners (
+                proxy_id      TEXT PRIMARY KEY,
+                profile_id    TEXT NOT NULL,
+                profile_name  TEXT NOT NULL,
+                first_seen    TEXT NOT NULL,
+                last_seen     TEXT NOT NULL
+            );
+
+            -- Exit ownership is a history, not merely the latest value. If a
+            -- provider moves Account A from address X to Y, X must not then be
+            -- handed to Account B: a service can remember the old address long
+            -- after the provider rotated it.
+            CREATE TABLE IF NOT EXISTS isolation_exit_owners (
+                exit_ip       TEXT PRIMARY KEY,
+                profile_id    TEXT NOT NULL,
+                profile_name  TEXT NOT NULL,
+                first_seen    TEXT NOT NULL,
+                last_seen     TEXT NOT NULL
+            );
 
             CREATE TABLE IF NOT EXISTS window_numbers (
                 number      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -771,6 +805,97 @@ impl Store {
         Ok(())
     }
 
+    /// Reserve one proxy and one observed public exit for a profile.
+    ///
+    /// The caller performs the live check; this keeps its result across
+    /// restarts.  A proxy provider can sell ten credentials that all leave
+    /// through one gateway, so the proxy id and the observed address are two
+    /// separate uniqueness rules.
+    pub async fn reserve_isolation_assignment(
+        &self,
+        profile_id: &str,
+        profile_name: &str,
+        proxy_id: &str,
+        exit_ip: &str,
+        unique_proxy: bool,
+        unique_exit: bool,
+    ) -> anyhow::Result<Option<IsolationConflict>> {
+        if unique_proxy {
+            let conflict = sqlx::query(
+                "SELECT profile_id, profile_name
+                   FROM isolation_proxy_owners
+                  WHERE proxy_id = ? AND profile_id <> ?",
+            )
+            .bind(proxy_id)
+            .bind(profile_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            if let Some(row) = conflict {
+                return Ok(Some(IsolationConflict {
+                    profile_id: row.get("profile_id"),
+                    profile_name: row.get("profile_name"),
+                    kind: "proxy",
+                }));
+            }
+        }
+        if unique_exit {
+            let conflict = sqlx::query(
+                "SELECT profile_id, profile_name
+                   FROM isolation_exit_owners
+                  WHERE exit_ip = ? AND profile_id <> ?",
+            )
+            .bind(exit_ip)
+            .bind(profile_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            if let Some(row) = conflict {
+                return Ok(Some(IsolationConflict {
+                    profile_id: row.get("profile_id"),
+                    profile_name: row.get("profile_name"),
+                    kind: "exit",
+                }));
+            }
+        }
+
+        let seen = now();
+        if unique_proxy {
+            sqlx::query(
+                "INSERT INTO isolation_proxy_owners
+                    (proxy_id, profile_id, profile_name, first_seen, last_seen)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON CONFLICT(proxy_id) DO UPDATE SET
+                    profile_name = excluded.profile_name,
+                    last_seen = excluded.last_seen",
+            )
+            .bind(proxy_id)
+            .bind(profile_id)
+            .bind(profile_name)
+            .bind(&seen)
+            .bind(&seen)
+            .execute(&self.pool)
+            .await?;
+        }
+        if unique_exit {
+            sqlx::query(
+                "INSERT INTO isolation_exit_owners
+                    (exit_ip, profile_id, profile_name, first_seen, last_seen)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON CONFLICT(exit_ip) DO UPDATE SET
+                    profile_name = excluded.profile_name,
+                    last_seen = excluded.last_seen",
+            )
+            .bind(exit_ip)
+            .bind(profile_id)
+            .bind(profile_name)
+            .bind(&seen)
+            .bind(&seen)
+            .execute(&self.pool)
+            .await?;
+        }
+
+        Ok(None)
+    }
+
     /// The machine key, shared rather than rebuilt: a second vault would seal
     /// values the first could not open.
     pub fn vault(&self) -> &crate::vault::Vault {
@@ -843,6 +968,24 @@ impl Store {
         .await?;
 
         Ok(rows.into_iter().map(row_to_profile).collect())
+    }
+
+    /// Which other live profile already points at this saved proxy?
+    pub async fn profile_using_proxy(
+        &self,
+        proxy_id: &str,
+        except_profile_id: &str,
+    ) -> anyhow::Result<Option<(String, String)>> {
+        let row = sqlx::query(
+            "SELECT id, name FROM profiles
+              WHERE deleted_at IS NULL AND proxy_id = ? AND id <> ?
+              LIMIT 1",
+        )
+        .bind(proxy_id)
+        .bind(except_profile_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| (r.get("id"), r.get("name"))))
     }
 
     /// Put profiles into a project, or take them out of one with `None`.
@@ -1053,10 +1196,20 @@ impl Store {
         if dir.exists() {
             std::fs::remove_dir_all(dir)?;
         }
-        sqlx::query("DELETE FROM profiles WHERE id = ? AND deleted_at IS NOT NULL")
+        let deleted = sqlx::query("DELETE FROM profiles WHERE id = ? AND deleted_at IS NOT NULL")
             .bind(id)
             .execute(&self.pool)
             .await?;
+        if deleted.rows_affected() > 0 {
+            sqlx::query("DELETE FROM isolation_proxy_owners WHERE profile_id = ?")
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+            sqlx::query("DELETE FROM isolation_exit_owners WHERE profile_id = ?")
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        }
         Ok(())
     }
 
@@ -1576,6 +1729,46 @@ mod tests {
             Some("Europe/Berlin"),
             "the launch path cannot see the exit it is supposed to follow"
         );
+    }
+
+    #[tokio::test]
+    async fn strict_isolation_reserves_both_the_proxy_and_the_real_exit() {
+        let s = store().await;
+        assert!(s
+            .reserve_isolation_assignment("a", "Account A", "proxy-a", "203.0.113.10", true, true)
+            .await
+            .unwrap()
+            .is_none());
+
+        let same_proxy = s
+            .reserve_isolation_assignment("b", "Account B", "proxy-a", "203.0.113.11", true, true)
+            .await
+            .unwrap()
+            .expect("the shared proxy must conflict");
+        assert_eq!(same_proxy.profile_id, "a");
+        assert_eq!(same_proxy.kind, "proxy");
+
+        // A provider rotation adds an address to A's history; it does not
+        // release the old one for B.
+        assert!(s
+            .reserve_isolation_assignment("a", "Account A", "proxy-a", "203.0.113.12", true, true)
+            .await
+            .unwrap()
+            .is_none());
+
+        let same_exit = s
+            .reserve_isolation_assignment("b", "Account B", "proxy-b", "203.0.113.10", true, true)
+            .await
+            .unwrap()
+            .expect("different credentials on one exit must conflict");
+        assert_eq!(same_exit.profile_id, "a");
+        assert_eq!(same_exit.kind, "exit");
+
+        assert!(s
+            .reserve_isolation_assignment("b", "Account B", "proxy-b", "203.0.113.11", true, true)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

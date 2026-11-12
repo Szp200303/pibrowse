@@ -218,6 +218,30 @@ struct Running {
     /// forwarded to the customer's upstream, so a day of opening and closing
     /// profiles left a machine full of live exits nothing was using.
     relay: tokio::task::JoinHandle<()>,
+    /// Owns one of the machine's configured browser slots. Dropping the
+    /// running entry makes the slot available to the next launch.
+    _slot: tokio::sync::OwnedSemaphorePermit,
+    /// Keeps this exit unavailable to another concurrent launch. The database
+    /// keeps the assignment across restarts; this guard closes the race between
+    /// two launches that resolve the same address at the same time.
+    _exit_claim: Option<ExitClaim>,
+}
+
+/// A process-lifetime claim on an observed public exit.
+struct ExitClaim {
+    claims: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    exit_ip: String,
+    profile_id: String,
+}
+
+impl Drop for ExitClaim {
+    fn drop(&mut self) {
+        if let Ok(mut claims) = self.claims.lock() {
+            if claims.get(&self.exit_ip) == Some(&self.profile_id) {
+                claims.remove(&self.exit_ip);
+            }
+        }
+    }
 }
 
 /// The backstop for an entry that leaves the map by any road but `stop`.
@@ -243,6 +267,9 @@ impl Drop for Running {
 pub struct Agent {
     store: Store,
     running: Mutex<HashMap<String, Running>>,
+    isolation: crate::isolation::Policy,
+    launch_slots: Arc<tokio::sync::Semaphore>,
+    exit_claims: Arc<std::sync::Mutex<HashMap<String, String>>>,
     /// Deliberately NOT a field holding the path. See [`Self::core`].
     /// Progress of a core download, if one was asked for. Shared rather than
     /// owned because the download outlives the IPC call that started it: 134 MB
@@ -331,6 +358,12 @@ impl Agent {
     pub async fn new() -> anyhow::Result<Arc<Self>> {
         paths::ensure_data_dir()?;
         let store = Store::open(&paths::db_path()).await?;
+        let isolation = crate::isolation::Policy::load(&paths::isolation_policy_file())?;
+        tracing::info!(
+            strict = isolation.strict,
+            max_concurrent_profiles = isolation.max_concurrent_profiles,
+            "account-isolation policy"
+        );
         // Every installation starts with somewhere to put a profile.
         store.default_project().await?;
         // Warm the keychain on its own thread. If the OS wants to ask about it,
@@ -372,6 +405,11 @@ impl Agent {
         let agent = Arc::new(Self {
             store,
             running: Mutex::new(HashMap::new()),
+            launch_slots: Arc::new(tokio::sync::Semaphore::new(
+                isolation.max_concurrent_profiles,
+            )),
+            isolation,
+            exit_claims: Arc::new(std::sync::Mutex::new(HashMap::new())),
             core_download: Default::default(),
             mirror: crate::mirror::Hub::new(),
             warmer: crate::warm::Warmer::new(),
@@ -381,6 +419,31 @@ impl Agent {
         });
         let _ = agent.me.set(Arc::downgrade(&agent));
         Ok(agent)
+    }
+
+    fn claim_exit(&self, profile_id: &str, exit_ip: &str) -> anyhow::Result<ExitClaim> {
+        let mut claims = self
+            .exit_claims
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the exit-claim table is unavailable"))?;
+        if let Some(other) = claims.get(exit_ip) {
+            if other != profile_id {
+                return Err(Coded {
+                    code: "err.exitConflict",
+                    message: format!(
+                        "exit {exit_ip} is already in use by profile {other}; strict isolation does not allow two accounts on one public address"
+                    ),
+                }
+                .into());
+            }
+        }
+        claims.insert(exit_ip.to_string(), profile_id.to_string());
+        drop(claims);
+        Ok(ExitClaim {
+            claims: Arc::clone(&self.exit_claims),
+            exit_ip: exit_ip.to_string(),
+            profile_id: profile_id.to_string(),
+        })
     }
 
     /// Start a warm-up on a browser that is running with its debugging port.
@@ -715,6 +778,8 @@ impl Agent {
                 let running = self.running.lock().await;
                 Ok(json!({
                     "version": env!("CARGO_PKG_VERSION"),
+                    "isolation": &self.isolation,
+                    "running_profiles": running.len(),
                     "core": self.core().map(|p| p.display().to_string()),
                     // Installed but the wrong Chrome: what it is and what is
                     // needed, for the shell to say so in its own language.
@@ -1722,6 +1787,29 @@ impl Agent {
                     );
                 }
 
+                if self.isolation.strict && self.isolation.unique_proxy_per_profile {
+                    let proxy_id = profile
+                        .proxy_id
+                        .as_deref()
+                        .filter(|id| !id.is_empty())
+                        .or_else(|| profile.proxy.as_ref().map(|p| p.id.as_str()));
+                    if let Some(proxy_id) = proxy_id {
+                        if let Some((_, other_name)) = self
+                            .store
+                            .profile_using_proxy(proxy_id, &profile.id)
+                            .await?
+                        {
+                            return Err(Coded {
+                                code: "err.proxyConflict",
+                                message: format!(
+                                    "this proxy is already assigned to profile {other_name:?}; strict isolation requires one saved proxy per account"
+                                ),
+                            }
+                            .into());
+                        }
+                    }
+                }
+
                 Ok(json!({ "id": self.store.upsert_profile(&profile).await? }))
             }
             // Make many at once. The one-at-a-time dialog is fine for a first
@@ -1751,6 +1839,18 @@ impl Agent {
                     params.get("template").cloned().unwrap_or(serde_json::Value::Null),
                 )
                 .map_err(|e| anyhow::anyhow!("template is not a profile: {e}"))?;
+                if self.isolation.strict
+                    && self.isolation.unique_proxy_per_profile
+                    && count > 1
+                    && (template.proxy_id.as_deref().is_some_and(|id| !id.is_empty())
+                        || template.proxy.is_some())
+                {
+                    return Err(Coded {
+                        code: "err.proxyConflict",
+                        message: "strict isolation cannot create several profiles with one template proxy; assign one unused proxy to each account".into(),
+                    }
+                    .into());
+                }
 
                 // "Shop {n}" numbers from 1. Without a placeholder the names are
                 // suffixed, because two hundred profiles called the same thing
@@ -2884,6 +2984,19 @@ impl Agent {
             }
         }
 
+        // A slot is taken before the network preflight and bundle pull, so five
+        // simultaneous Open clicks cannot all pass a count and then create ten
+        // browsers. It is released automatically on every error path.
+        let launch_slot = Arc::clone(&self.launch_slots)
+            .try_acquire_owned()
+            .map_err(|_| Coded {
+                code: "err.tooManyProfiles",
+                message: format!(
+                    "the account-isolation policy allows at most {} profiles to run or launch at once",
+                    self.isolation.max_concurrent_profiles
+                ),
+            })?;
+
         // A team profile does not exist in this machine's store — it lives on
         // the server, and the shell has already fetched it, opened the proxy
         // credentials with the organisation key, and handed the result down.
@@ -2917,12 +3030,22 @@ impl Agent {
         // proxy at all, and a flag arriving inline could otherwise be set by
         // anything that could reach this socket.
         let proxy = profile.proxy.as_ref();
-        if proxy.is_none() && (from_server || !profile.allow_no_proxy) {
+        let strict_requires_proxy =
+            self.isolation.strict && self.isolation.require_proxy;
+        if proxy.is_none()
+            && (strict_requires_proxy || from_server || !profile.allow_no_proxy)
+        {
             return Err(Coded {
                 // Two codes for one sentence, because what to do next differs:
                 // a profile of this machine's can be given the permission in
                 // its own settings, and a team one cannot be given it at all.
-                code: if from_server { "err.noProxyTeam" } else { "err.noProxy" },
+                code: if strict_requires_proxy {
+                    "err.strictProxy"
+                } else if from_server {
+                    "err.noProxyTeam"
+                } else {
+                    "err.noProxy"
+                },
                 message: "this profile has no proxy. Everything the core does goes through one, \
                           so launching without it would send traffic from this machine's own \
                           address"
@@ -2966,6 +3089,36 @@ impl Agent {
             );
         }
 
+        if self.isolation.strict {
+            let host_os = if cfg!(target_os = "windows") {
+                Some("Windows")
+            } else if cfg!(target_os = "macos") {
+                Some("macOS")
+            } else {
+                None
+            };
+            if host_os.is_some_and(|host| persona.os.name != host) {
+                return Err(Coded {
+                    code: "err.hostOsMismatch",
+                    message: format!(
+                        "strict isolation refuses a {} persona on this {} host because host-backed surfaces can reveal the real operating system",
+                        persona.os.name,
+                        host_os.unwrap_or("host")
+                    ),
+                }
+                .into());
+            }
+            if profile.overrides.canvas
+                == Some(fury_shared::overrides::CanvasMode::Real)
+            {
+                return Err(Coded {
+                    code: "err.realCanvasIsolation",
+                    message: "strict isolation requires per-profile canvas noise; real canvas would give every account this machine's rendering fingerprint".into(),
+                }
+                .into());
+            }
+        }
+
         let upstream = match proxy {
             // The persona's OS goes with it: through WireGuard the site's view
             // of this machine's TCP is ours to make, and it has to be the same
@@ -3005,9 +3158,85 @@ impl Agent {
         // Kept for the exit lookup below, which has to leave the same way —
         // through WireGuard, the very same tunnel (`wg_stack::Shared`).
         let exit_upstream = proxy.map(|_| upstream.clone());
+        let mut fresh_exit: Option<ExitFacts> = None;
+        let mut exit_claim: Option<ExitClaim> = None;
+
+        if self.isolation.strict && self.isolation.check_exit_on_every_launch {
+            let px = proxy.expect("strict mode refused a missing proxy above");
+            let mut facts = Self::resolve_exit(
+                exit_upstream.clone(),
+                px.checker_url.as_deref(),
+            )
+            .await
+            .map_err(|e| Coded {
+                code: "err.exitCheck",
+                message: format!(
+                    "the proxy exit could not be verified, so strict isolation kept the profile closed: {e:#}"
+                ),
+            })?;
+
+            let exit_ip = facts
+                .ip
+                .as_deref()
+                .and_then(crate::isolation::public_ip)
+                .ok_or_else(|| Coded {
+                    code: "err.exitUnknown",
+                    message: "the proxy checker did not return a valid public IP address; strict isolation cannot prove which exit this account would use".into(),
+                })?;
+            facts.ip = Some(exit_ip.clone());
+
+            // The in-memory claim closes the concurrent-launch race; the
+            // database reservation below keeps the same rule after a restart.
+            if self.isolation.unique_exit_ip {
+                exit_claim = Some(self.claim_exit(&profile.id, &exit_ip)?);
+            }
+            if let Some(conflict) = self
+                .store
+                .reserve_isolation_assignment(
+                    &profile.id,
+                    &profile.name,
+                    &px.id,
+                    &exit_ip,
+                    self.isolation.unique_proxy_per_profile,
+                    self.isolation.unique_exit_ip,
+                )
+                .await?
+            {
+                return Err(Coded {
+                    code: if conflict.kind == "proxy" {
+                        "err.proxyConflict"
+                    } else {
+                        "err.exitConflict"
+                    },
+                    message: format!(
+                        "{} is already assigned to profile {:?}; strict isolation kept {:?} closed",
+                        if conflict.kind == "proxy" {
+                            "this proxy"
+                        } else {
+                            "this public exit"
+                        },
+                        conflict.profile_name,
+                        profile.name
+                    ),
+                }
+                .into());
+            }
+            self.store
+                .record_exit(
+                    &px.id,
+                    facts.ip.as_deref(),
+                    facts.country.as_deref(),
+                    facts.timezone.as_deref(),
+                    facts.location.as_deref(),
+                )
+                .await?;
+            fresh_exit = Some(facts);
+        }
+
         let relay = crate::relay::Relay::new(upstream).blocking(blocked);
         let start_page = relay.start_url();
         let (relay_port, relay_task) = relay.serve(0).await?;
+        let mut relay_guard = AbortOnDrop(Some(relay_task));
         // The detect-suite probe, on the relay's own loopback address rather
         // than on `fury.invalid`, and the difference is not cosmetic: loopback
         // is a potentially trustworthy origin, so the page is a secure context
@@ -3037,16 +3266,26 @@ impl Agent {
         // for two questions with one answer is waste.
         let want_timezone = profile.timezone.is_none();
         let want_languages = profile.languages.is_none();
-        let mut exit_country = proxy.and_then(|p| p.last_country.clone());
-        let mut exit_timezone = proxy.and_then(|p| p.last_timezone.clone());
-        let mut exit_location = proxy.and_then(|p| p.last_location.clone());
+        let mut exit_country = fresh_exit
+            .as_ref()
+            .and_then(|f| f.country.clone())
+            .or_else(|| proxy.and_then(|p| p.last_country.clone()));
+        let mut exit_timezone = fresh_exit
+            .as_ref()
+            .and_then(|f| f.timezone.clone())
+            .or_else(|| proxy.and_then(|p| p.last_timezone.clone()));
+        let mut exit_location = fresh_exit
+            .as_ref()
+            .and_then(|f| f.location.clone())
+            .or_else(|| proxy.and_then(|p| p.last_location.clone()));
 
         // The position joins the same lookup: one round trip answers where the
         // exit is, what time it is there and what language it speaks, and asking
         // separately would let the three drift apart.
-        if (want_timezone && exit_timezone.is_none())
-            || (want_languages && exit_country.is_none())
-            || exit_location.is_none()
+        if fresh_exit.is_none()
+            && ((want_timezone && exit_timezone.is_none())
+                || (want_languages && exit_country.is_none())
+                || exit_location.is_none())
         {
             // With no proxy the question is still worth asking, and the answer
             // is this machine. A profile that follows its exit and then claims
@@ -3399,7 +3638,9 @@ impl Agent {
                 relay_port,
                 ws_endpoint: cdp_endpoint.as_ref().map(|(_, ws)| ws.clone()),
                 background,
-                relay: relay_task,
+                relay: relay_guard.0.take().expect("the relay guard owns the task"),
+                _slot: launch_slot,
+                _exit_claim: exit_claim,
                 server: server.map(|s| (s, pulled_version)),
                 profile_key,
                 key_generation,
@@ -3922,6 +4163,10 @@ mod exit_check_tests {
                 ws_endpoint: None,
                 background: false,
                 relay: tokio::spawn(async {}),
+                _slot: std::sync::Arc::clone(&agent.launch_slots)
+                    .try_acquire_owned()
+                    .unwrap(),
+                _exit_claim: None,
             },
         );
         let flag = || agent.exit_when_idle.load(std::sync::atomic::Ordering::SeqCst);

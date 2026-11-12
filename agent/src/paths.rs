@@ -26,6 +26,15 @@ pub fn db_path() -> PathBuf {
     data_dir().join("fury.db")
 }
 
+/// Account-isolation rules for this machine.
+///
+/// Kept beside the database so a backup carries the policy that made those
+/// profiles safe to operate, without putting machine-specific limits into a
+/// team server.
+pub fn isolation_policy_file() -> PathBuf {
+    data_dir().join("isolation.json")
+}
+
 /// Where an installed core lives.
 ///
 /// Separate from the desktop shell's application bundle, and that separation is

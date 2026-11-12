@@ -442,7 +442,7 @@ export function ProfileDialog({
         // Only ever true for a profile that has no proxy. Leaving a stale
         // permission on a profile that was later given one would be a switch
         // nobody can see, waiting for the day the proxy is removed again.
-        allow_no_proxy: !useProxyId && allowNoProxy,
+        allow_no_proxy: false,
         blocklists,
         last_opened_at: null,
       },
@@ -464,7 +464,10 @@ export function ProfileDialog({
   // own address. Said here, under the fields, with the button off, rather than
   // as an error after Create -- which is where it was said until 21.09.2026,
   // in English, to somebody whose interface was in Russian.
-  const needsProxy = target === "team";
+  // Strict account isolation is enabled for this Windows build. A direct
+  // profile would be refused by the agent, so the editor must require a proxy
+  // instead of offering a choice that can only fail at launch.
+  const needsProxy = true;
   const hasProxy = proxyMode === "saved" ? proxyId !== "" : pxComplete;
 
   // Offered in both proxy modes. It lived under "saved" with "none" picked,

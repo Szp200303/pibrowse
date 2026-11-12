@@ -76,11 +76,12 @@ export function assess(p: Profile, personas: Set<string> | null, sharing: number
     raise("warn");
   }
 
-  // Several accounts behind one exit is the oldest farm signature there is
-  // (docs/12 C). Two is a household; from three on it is said.
-  if (sharing >= 3) {
+  // Strict account isolation is one account per observed exit.  Treat this as
+  // a block in the list as well as in the agent, so the operator sees the
+  // conflict before spending a network round trip on a launch that must fail.
+  if (sharing >= 2) {
     notes.push({ key: "cons.sharedExit", vars: { n: sharing } });
-    raise("warn");
+    raise("block");
   }
 
   return { level, notes };
